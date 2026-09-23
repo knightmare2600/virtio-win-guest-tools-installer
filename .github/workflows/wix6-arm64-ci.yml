@@ -152,7 +152,7 @@ jobs:
           Set-Content ph\ph.txt "placeholder"
           Set-Content ph\ph.wxs @'
           <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
-            <Package Name="$(PhName)" Manufacturer="placeholder" Version="1.0.0" ProductCode="$(PhGuid)" UpgradeCode="$(PhUpg)" Scope="perMachine" InstallerVersion="500">
+            <Package Name="$(env.PhName)" Manufacturer="placeholder" Version="1.0.0" ProductCode="$(env.PhGuid)" UpgradeCode="$(env.PhUpg)" Scope="perMachine" InstallerVersion="500">
               <MediaTemplate EmbedCab="yes" />
               <Feature Id="F" Level="1"><ComponentGroupRef Id="G" /></Feature>
             </Package>
@@ -168,9 +168,12 @@ jobs:
           </Project>
           '@
           foreach ($n in "ph-drv-x64","ph-drv-x86","ph-spice-driver-x64","ph-spice-driver-x86","ph-spice-vdagent-x64","ph-spice-vdagent-x86","ph-qemu-ga-x64","ph-qemu-ga-x86") {
-            $g = "{" + [guid]::NewGuid().ToString().ToUpper() + "}"; $u = "{" + [guid]::NewGuid().ToString().ToUpper() + "}"
-            dotnet build ph\ph.wixproj -c Release -p:OutputName=$n -p:OutDir="${{ github.workspace }}\stage\" -p:IntermediateOutputPath="obj\$n\" `
-              "-p:DefineConstants=PhName=$n%3BPhGuid=$g%3BPhUpg=$u"
+            # passed through the environment: the WiX preprocessor reads it as $(env.X), which avoids MSBuild
+            # splitting a DefineConstants value on semicolons
+            $env:PhName = $n
+            $env:PhGuid = "{" + [guid]::NewGuid().ToString().ToUpper() + "}"
+            $env:PhUpg  = "{" + [guid]::NewGuid().ToString().ToUpper() + "}"
+            dotnet build ph\ph.wixproj -c Release -p:OutputName=$n -p:OutDir="${{ github.workspace }}\stage\" -p:IntermediateOutputPath="obj\$n\"
             if ($LASTEXITCODE -ne 0) { throw "placeholder $n failed" }
           }
           Get-ChildItem stage
