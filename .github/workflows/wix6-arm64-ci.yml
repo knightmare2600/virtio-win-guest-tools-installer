@@ -151,9 +151,10 @@ jobs:
           import msi_values as v
           msi = t.MSI(sys.argv[1], "arm64")
           n = 0
-          for fn in (v.get_expected_componentids, v.get_expected_upgrade_code,
-                     v.get_expected_allusers_property, v.get_expected_RegLocator):
-              (table, *_), expected = fn()
+          # table names exactly as upstream's own test functions pass them
+          for fn, table in ((v.get_expected_componentids, "Component"), (v.get_expected_upgrade_code, "Property"),
+                            (v.get_expected_allusers_property, "Property"), (v.get_expected_RegLocator, "RegLocator")):
+              _, expected = fn()
               t._generic_msi_value_test([msi], table, expected)
               n += len(expected["arm64"]); print("ok ", fn.__name__, len(expected["arm64"]), "expectations")
           print("all", n, "arm64 expectations hold")
