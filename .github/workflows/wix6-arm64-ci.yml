@@ -146,11 +146,32 @@ jobs:
           $built = Get-ChildItem -Recurse stage -Filter virtio-win-gt-arm64.msi | Select-Object -First 1
           Move-Item $built.FullName stage\virtio-win-gt-arm64.msi -Force
           gh release download arm64-preview-0.0.5 --repo ${{ github.repository }} -p qemu-ga-arm64.msi -D stage
-          # The x64/x86/Spice slots need valid MSIs to compile the bundle. They are never installed on arm64
-          # (their conditions are false there); copies of the arm64 MSIs stand in for them. TEST BUNDLE ONLY.
-          foreach ($n in "x64","x86") { Copy-Item stage\virtio-win-gt-arm64.msi "stage\ph-drv-$n.msi" }
-          foreach ($n in "spice-driver-x64","spice-driver-x86","spice-vdagent-x64","spice-vdagent-x86","qemu-ga-x64","qemu-ga-x86") {
-            Copy-Item stage\qemu-ga-arm64.msi "stage\ph-$n.msi"
+          # The x64/x86/Spice slots need valid MSIs with distinct ProductCodes (Burn rejects duplicate CacheIds).
+          # They are never installed on arm64 (their conditions are false there). TEST BUNDLE ONLY.
+          New-Item -ItemType Directory -Force -Path ph | Out-Null
+          Set-Content ph\ph.txt "placeholder"
+          Set-Content ph\ph.wxs @'
+          <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+            <Package Name="$(PhName)" Manufacturer="placeholder" Version="1.0.0" ProductCode="$(PhGuid)" UpgradeCode="$(PhUpg)" Scope="perMachine" InstallerVersion="500">
+              <MediaTemplate EmbedCab="yes" />
+              <Feature Id="F" Level="1"><ComponentGroupRef Id="G" /></Feature>
+            </Package>
+            <Fragment>
+              <StandardDirectory Id="ProgramFiles6432Folder"><Directory Id="D" Name="placeholder" /></StandardDirectory>
+              <ComponentGroup Id="G" Directory="D"><Component Guid="*"><File Source="ph.txt" /></Component></ComponentGroup>
+            </Fragment>
+          </Wix>
+          '@
+          Set-Content ph\ph.wixproj @'
+          <Project Sdk="WixToolset.Sdk/6.0.2">
+            <PropertyGroup><Platform Condition=" '$(Platform)' == '' ">x64</Platform><SuppressValidation>true</SuppressValidation></PropertyGroup>
+          </Project>
+          '@
+          foreach ($n in "ph-drv-x64","ph-drv-x86","ph-spice-driver-x64","ph-spice-driver-x86","ph-spice-vdagent-x64","ph-spice-vdagent-x86","ph-qemu-ga-x64","ph-qemu-ga-x86") {
+            $g = "{" + [guid]::NewGuid().ToString().ToUpper() + "}"; $u = "{" + [guid]::NewGuid().ToString().ToUpper() + "}"
+            dotnet build ph\ph.wixproj -c Release -p:OutputName=$n -p:OutDir="${{ github.workspace }}\stage\" -p:IntermediateOutputPath="obj\$n\" `
+              "-p:DefineConstants=PhName=$n;PhGuid=$g;PhUpg=$u"
+            if ($LASTEXITCODE -ne 0) { throw "placeholder $n failed" }
           }
           Get-ChildItem stage
       - name: Build the test bundle (IncludeArm64=true, with an arm64 qemu-ga)
