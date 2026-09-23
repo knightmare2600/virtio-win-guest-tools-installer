@@ -1,0 +1,179 @@
+name: WiX 6 arm64 build and checks
+
+# Fork-only CI for the arm64 work: NOT part of the upstream pull request.
+# Builds the DrvInstCA custom action for ARM64, the arm64 driver MSI and a test bundle on the free
+# windows-latest runner (cross-compiling; no arm64 runner is needed), then asserts on the built MSI's
+# tables the things that previously only showed up on a real install.
+
+on:
+  push:
+    branches: [arm64-wix6-ci]
+  workflow_dispatch:
+
+env:
+  WIX3_DIR: ${{ github.workspace }}\wix314
+  SOLUTION_DIR: ${{ github.workspace }}\src\DrvInst\
+  VERSION: '0.0.6'
+
+jobs:
+  ca:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch WiX 3.14.1 SDK (arm64 static libs for the CA; the MSI itself is built with WiX 6)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          Invoke-WebRequest -Uri "https://github.com/wixtoolset/wix3/releases/download/wix3141rtm/wix314-binaries.zip" `
+            -OutFile "$env:RUNNER_TEMP\wix314-binaries.zip"
+          Expand-Archive -Path "$env:RUNNER_TEMP\wix314-binaries.zip" -DestinationPath "${{ env.WIX3_DIR }}"
+          if (-not (Test-Path "${{ env.WIX3_DIR }}\sdk\vs2017\lib\arm64\dutil.lib")) { throw "arm64 SDK libs missing" }
+      - uses: microsoft/setup-msbuild@v2
+      - name: Detect installed Windows SDK
+        id: sdk
+        shell: pwsh
+        run: |
+          $sdk = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\Include" | Sort-Object Name -Descending | Select-Object -First 1
+          "version=$($sdk.Name)" >> $env:GITHUB_OUTPUT
+      - name: Build DrvInstCA.dll (Release and Debug, ARM64)
+        shell: pwsh
+        run: |
+          foreach ($cfg in "Release", "Debug") {
+            msbuild src\DrvInst\DrvInstCA\DrvInstCA.vcxproj `
+              /p:Configuration=$cfg /p:Platform=ARM64 `
+              /p:WIX="${{ env.WIX3_DIR }}\" /p:WixPlatformToolset=VS2017 `
+              /p:WindowsTargetPlatformVersion=${{ steps.sdk.outputs.version }} `
+              /p:SolutionDir="${{ env.SOLUTION_DIR }}" /p:PlatformTarget=arm64 /m
+            if ($LASTEXITCODE -ne 0) { throw "DrvInstCA $cfg|ARM64 build failed" }
+          }
+      - name: Collect
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path out | Out-Null
+          Copy-Item src\DrvInst\Install\Release\arm64\DrvInstCA.dll out\
+          Get-FileHash out\DrvInstCA.dll -Algorithm SHA256
+          Get-ChildItem out
+      - uses: actions/upload-artifact@v4
+        with: { name: DrvInstCA-arm64, path: out/, if-no-files-found: error }
+
+  msi:
+    needs: ca
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { name: DrvInstCA-arm64, path: Libraries/arm64 }
+      - name: Fetch arm64 driver content (repack of the official virtio-win tree)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          Invoke-WebRequest -Uri "https://github.com/qemus/virtiso-arm/releases/download/v0.1.285-1/virtio-win-0.1.285.tar.xz" `
+            -OutFile "$env:RUNNER_TEMP\drivers.tar.xz"
+          New-Item -ItemType Directory -Force -Path "$env:RUNNER_TEMP\drivers" | Out-Null
+          tar -xf "$env:RUNNER_TEMP\drivers.tar.xz" -C "$env:RUNNER_TEMP\drivers"
+          Get-ChildItem "$env:RUNNER_TEMP\drivers"
+      - name: Build the arm64 driver MSI with WiX 6
+        shell: pwsh
+        run: |
+          dotnet build virtio-win-drivers-installer\virtio-win-drivers-installer.wixproj -c Release `
+            -p:Platform=arm64 -p:InstallerVersion=${{ env.VERSION }} `
+            -p:VirtioWinDriversPath="$env:RUNNER_TEMP\drivers"
+          if ($LASTEXITCODE -ne 0) { throw "dotnet build failed" }
+          Get-ChildItem -Recurse virtio-win-drivers-installer\bin -Filter *.msi | ForEach-Object { $_.FullName }
+      - name: Assert on the built MSI (what previously needed a real install to find)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $msi = (Get-ChildItem -Recurse virtio-win-drivers-installer\bin -Filter virtio-win-gt-arm64.msi | Select-Object -First 1).FullName
+          $inst = New-Object -ComObject WindowsInstaller.Installer
+          $db = $inst.OpenDatabase($msi, 0)
+          function Q($sql) {
+            $v = $db.OpenView($sql); $v.Execute()
+            $rows = @()
+            while ($r = $v.Fetch()) { $rows += ,@(1..$v.ColumnInfo(0).FieldCount | ForEach-Object { $r.StringData($_) }) }
+            $v.Close(); return $rows
+          }
+          $fail = 0
+          function Check($ok, $what) { if ($ok) { Write-Host "PASS  $what" } else { Write-Host "FAIL  $what"; $script:fail++ } }
+          $tmpl = $db.SummaryInformation(0).Property(7)
+          Check ($tmpl -match "^Arm64") "Template summary property declares Arm64 (got '$tmpl')"
+          $ver = $db.SummaryInformation(0).Property(14)
+          Check ($ver -ge 500) "Schema/InstallerVersion >= 500 (got $ver)"
+          $app = (Q "SELECT ``Property`` FROM ``AppSearch``") | ForEach-Object { $_[0] }
+          Check ($app -contains "REGISTRY_PROCESSOR_ARCHITECTURE") "AppSearch has REGISTRY_PROCESSOR_ARCHITECTURE (the bug that blocked the first install)"
+          $lc = (Q "SELECT ``Condition``, ``Description`` FROM ``LaunchCondition``")
+          $lc | ForEach-Object { Write-Host "  LaunchCondition: $($_[0])  ->  $($_[1])" }
+          Check (($lc | Where-Object { $_[0] -match 'REGISTRY_PROCESSOR_ARCHITECTURE = "ARM64"' }).Count -eq 1) "arm64 launch condition present"
+          $reg = (Q "SELECT ``Key``, ``Name``, ``Type`` FROM ``RegLocator`` WHERE ``Name``='PROCESSOR_ARCHITECTURE'")
+          $reg | ForEach-Object { Write-Host "  RegLocator: $($_ -join ' | ')" }
+          Check ($reg.Count -eq 1) "RegLocator for PROCESSOR_ARCHITECTURE"
+          $props = @{}; (Q "SELECT ``Property``, ``Value`` FROM ``Property``") | ForEach-Object { $props[$_[0]] = $_[1] }
+          Check ($props["SecureCustomProperties"] -match "REGISTRY_PROCESSOR_ARCHITECTURE") "SecureCustomProperties lists REGISTRY_PROCESSOR_ARCHITECTURE"
+          Check ($props["UpgradeCode"] -eq "{10725300-348B-4908-B52E-4D71B15480F4}") "UpgradeCode is the arm64 one"
+          $feat = (Q "SELECT ``Feature`` FROM ``Feature``") | ForEach-Object { $_[0] }
+          Write-Host "  Features: $($feat -join ', ')"
+          foreach ($f in "FE_pvpanic_driver","FE_fwcfg_driver","FE_qemupciserial_driver","FE_viofs_driver") { Check ($feat -notcontains $f) "$f is not packaged on arm64" }
+          foreach ($f in "FE_balloon_driver","FE_network_driver","FE_vioinput_driver","FE_viorng_driver","FE_vioscsi_driver","FE_vioserial_driver","FE_viostor_driver","FE_viogpudo_driver","FE_viomem_driver") { Check ($feat -contains $f) "$f is packaged" }
+          $ca = (Q "SELECT ``Action``, ``Source``, ``Target`` FROM ``CustomAction`` WHERE ``Target``='ProcessPackages'")
+          Check ($ca.Count -eq 1) "ProcessDriverPackages custom action present"
+          if ($fail) { throw "$fail assertion(s) failed" }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: virtio-win-gt-arm64-msi
+          path: virtio-win-drivers-installer/bin/**/virtio-win-gt-arm64.msi
+          if-no-files-found: error
+
+  bundle:
+    needs: msi
+    runs-on: windows-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { name: virtio-win-gt-arm64-msi, path: stage }
+      - uses: actions/download-artifact@v4
+        with: { name: DrvInstCA-arm64, path: Libraries/arm64 }
+      - name: Get a real qemu-ga arm64 MSI and placeholder MSIs for the packages that are inert on arm64
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          gh release download arm64-preview-0.0.5 --repo ${{ github.repository }} -p qemu-ga-arm64.msi -D stage
+          # The x64/x86/Spice slots need valid MSIs to compile the bundle. They are never installed on arm64
+          # (their conditions are false there); copies of the arm64 MSIs stand in for them. TEST BUNDLE ONLY.
+          foreach ($n in "x64","x86") { Copy-Item stage\virtio-win-gt-arm64.msi "stage\ph-drv-$n.msi" }
+          foreach ($n in "spice-driver-x64","spice-driver-x86","spice-vdagent-x64","spice-vdagent-x86","qemu-ga-x64","qemu-ga-x86") {
+            Copy-Item stage\qemu-ga-arm64.msi "stage\ph-$n.msi"
+          }
+          Get-ChildItem stage
+      - name: Build the test bundle (IncludeArm64=true, with an arm64 qemu-ga)
+        shell: pwsh
+        run: |
+          $s = "${{ github.workspace }}\stage"
+          dotnet build virtio-win-installers-bundler\virtio-win-installers-bundler.wixproj -c Release `
+            -p:InstallerVersion=${{ env.VERSION }} -p:BuildBundledDriverMsis=false -p:IncludeArm64=true `
+            -p:VirtioWinGtX64MsiPath="$s\ph-drv-x64.msi" -p:VirtioWinGtX86MsiPath="$s\ph-drv-x86.msi" `
+            -p:VirtioWinGtArm64MsiPath="$s\virtio-win-gt-arm64.msi" -p:QemuGaArm64MsiPath="$s\qemu-ga-arm64.msi" `
+            -p:SpiceDriver64MsiPath="$s\ph-spice-driver-x64.msi" -p:SpiceDriver86MsiPath="$s\ph-spice-driver-x86.msi" `
+            -p:SpiceVdagent64MsiPath="$s\ph-spice-vdagent-x64.msi" -p:SpiceVdagent86MsiPath="$s\ph-spice-vdagent-x86.msi" `
+            -p:QemuGa64MsiPath="$s\ph-qemu-ga-x64.msi" -p:QemuGa86MsiPath="$s\ph-qemu-ga-x86.msi"
+          if ($LASTEXITCODE -ne 0) { throw "bundle build (arm64 included) failed" }
+          New-Item -ItemType Directory -Force -Path out | Out-Null
+          Copy-Item (Get-ChildItem -Recurse virtio-win-installers-bundler\bin -Filter virtio-win-guest-tools.exe | Select-Object -First 1).FullName out\virtio-win-guest-tools-TEST-arm64.exe
+      - name: Build the bundle again with arm64 excluded (regression check for the default path)
+        shell: pwsh
+        run: |
+          $s = "${{ github.workspace }}\stage"
+          dotnet build virtio-win-installers-bundler\virtio-win-installers-bundler.wixproj -c Release --no-incremental `
+            -p:InstallerVersion=${{ env.VERSION }} -p:BuildBundledDriverMsis=false -p:IncludeArm64=false `
+            -p:VirtioWinGtX64MsiPath="$s\ph-drv-x64.msi" -p:VirtioWinGtX86MsiPath="$s\ph-drv-x86.msi" `
+            -p:SpiceDriver64MsiPath="$s\ph-spice-driver-x64.msi" -p:SpiceDriver86MsiPath="$s\ph-spice-driver-x86.msi" `
+            -p:SpiceVdagent64MsiPath="$s\ph-spice-vdagent-x64.msi" -p:SpiceVdagent86MsiPath="$s\ph-spice-vdagent-x86.msi" `
+            -p:QemuGa64MsiPath="$s\ph-qemu-ga-x64.msi" -p:QemuGa86MsiPath="$s\ph-qemu-ga-x86.msi"
+          if ($LASTEXITCODE -ne 0) { throw "bundle build (arm64 excluded) failed" }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: TEST-bundle-arm64
+          path: |
+            out/virtio-win-guest-tools-TEST-arm64.exe
+          if-no-files-found: error
