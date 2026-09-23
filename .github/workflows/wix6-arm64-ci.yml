@@ -142,6 +142,9 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
+          # the artifact keeps the build output's subfolders; flatten it
+          $built = Get-ChildItem -Recurse stage -Filter virtio-win-gt-arm64.msi | Select-Object -First 1
+          Move-Item $built.FullName stage\virtio-win-gt-arm64.msi -Force
           gh release download arm64-preview-0.0.5 --repo ${{ github.repository }} -p qemu-ga-arm64.msi -D stage
           # The x64/x86/Spice slots need valid MSIs to compile the bundle. They are never installed on arm64
           # (their conditions are false there); copies of the arm64 MSIs stand in for them. TEST BUNDLE ONLY.
