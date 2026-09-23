@@ -90,6 +90,7 @@ jobs:
     needs: msi
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with: { name: virtio-win-gt-arm64-msi, path: msi }
       - name: Install msitools (the tool upstream's own test/test.py uses)
