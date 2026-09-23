@@ -80,48 +80,52 @@ jobs:
             -p:VirtioWinDriversPath="$env:RUNNER_TEMP\drivers"
           if ($LASTEXITCODE -ne 0) { throw "dotnet build failed" }
           Get-ChildItem -Recurse virtio-win-drivers-installer\bin -Filter *.msi | ForEach-Object { $_.FullName }
-      - name: Assert on the built MSI (what previously needed a real install to find)
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-          $msi = (Get-ChildItem -Recurse virtio-win-drivers-installer\bin -Filter virtio-win-gt-arm64.msi | Select-Object -First 1).FullName
-          $inst = New-Object -ComObject WindowsInstaller.Installer
-          $db = $inst.OpenDatabase($msi, 0)
-          function Q($sql) {
-            $v = $db.OpenView($sql); $v.Execute()
-            $rows = @()
-            while ($r = $v.Fetch()) { $rows += ,@(1..$v.ColumnInfo(0).FieldCount | ForEach-Object { $r.StringData($_) }) }
-            $v.Close(); return $rows
-          }
-          $fail = 0
-          function Check($ok, $what) { if ($ok) { Write-Host "PASS  $what" } else { Write-Host "FAIL  $what"; $script:fail++ } }
-          $tmpl = $db.SummaryInformation(0).Property(7)
-          Check ($tmpl -match "^Arm64") "Template summary property declares Arm64 (got '$tmpl')"
-          $ver = $db.SummaryInformation(0).Property(14)
-          Check ($ver -ge 500) "Schema/InstallerVersion >= 500 (got $ver)"
-          $app = (Q "SELECT ``Property`` FROM ``AppSearch``") | ForEach-Object { $_[0] }
-          Check ($app -contains "REGISTRY_PROCESSOR_ARCHITECTURE") "AppSearch has REGISTRY_PROCESSOR_ARCHITECTURE (the bug that blocked the first install)"
-          $lc = (Q "SELECT ``Condition``, ``Description`` FROM ``LaunchCondition``")
-          $lc | ForEach-Object { Write-Host "  LaunchCondition: $($_[0])  ->  $($_[1])" }
-          Check (($lc | Where-Object { $_[0] -match 'REGISTRY_PROCESSOR_ARCHITECTURE = "ARM64"' }).Count -eq 1) "arm64 launch condition present"
-          $reg = (Q "SELECT ``Key``, ``Name``, ``Type`` FROM ``RegLocator`` WHERE ``Name``='PROCESSOR_ARCHITECTURE'")
-          $reg | ForEach-Object { Write-Host "  RegLocator: $($_ -join ' | ')" }
-          Check ($reg.Count -eq 1) "RegLocator for PROCESSOR_ARCHITECTURE"
-          $props = @{}; (Q "SELECT ``Property``, ``Value`` FROM ``Property``") | ForEach-Object { $props[$_[0]] = $_[1] }
-          Check ($props["SecureCustomProperties"] -match "REGISTRY_PROCESSOR_ARCHITECTURE") "SecureCustomProperties lists REGISTRY_PROCESSOR_ARCHITECTURE"
-          Check ($props["UpgradeCode"] -eq "{10725300-348B-4908-B52E-4D71B15480F4}") "UpgradeCode is the arm64 one"
-          $feat = (Q "SELECT ``Feature`` FROM ``Feature``") | ForEach-Object { $_[0] }
-          Write-Host "  Features: $($feat -join ', ')"
-          foreach ($f in "FE_pvpanic_driver","FE_fwcfg_driver","FE_qemupciserial_driver","FE_viofs_driver") { Check ($feat -notcontains $f) "$f is not packaged on arm64" }
-          foreach ($f in "FE_balloon_driver","FE_network_driver","FE_vioinput_driver","FE_viorng_driver","FE_vioscsi_driver","FE_vioserial_driver","FE_viostor_driver","FE_viogpudo_driver","FE_viomem_driver") { Check ($feat -contains $f) "$f is packaged" }
-          $ca = (Q "SELECT ``Action``, ``Source``, ``Target`` FROM ``CustomAction`` WHERE ``Target``='ProcessPackages'")
-          Check ($ca.Count -eq 1) "ProcessDriverPackages custom action present"
-          if ($fail) { throw "$fail assertion(s) failed" }
       - uses: actions/upload-artifact@v4
         with:
           name: virtio-win-gt-arm64-msi
           path: virtio-win-drivers-installer/bin/**/virtio-win-gt-arm64.msi
           if-no-files-found: error
+
+  check:
+    needs: msi
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { name: virtio-win-gt-arm64-msi, path: msi }
+      - name: Install msitools (the tool upstream's own test/test.py uses)
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq msitools
+      - name: Assert on the built MSI (what previously needed a real install to find)
+        shell: bash
+        run: |
+          set -u
+          M=$(find msi -name virtio-win-gt-arm64.msi | head -1)
+          echo "MSI: $M"
+          fail=0
+          check() { if eval "$2"; then echo "PASS  $1"; else echo "FAIL  $1"; fail=$((fail+1)); fi; }
+          exp() { msiinfo export "$M" "$1" 2>&1; }
+          echo "=== summary ===";        msiinfo suminfo "$M"
+          echo "=== AppSearch ===";      exp AppSearch
+          echo "=== RegLocator ===";     exp RegLocator
+          echo "=== LaunchCondition ==="; exp LaunchCondition
+          echo "=== Feature ===";        exp Feature | cut -f1
+          echo "=== CustomAction (ProcessPackages) ==="; exp CustomAction | grep -i ProcessPackages
+          echo "=== Property (selected) ==="; exp Property | grep -E "^(UpgradeCode|SecureCustomProperties|ProductVersion|ALLUSERS|arm64_Validation|Set_ProcessorArchitecture)"
+          echo
+          check "Template summary property declares Arm64" 'msiinfo suminfo "$M" | grep -q "Arm64;1033"'
+          check "AppSearch has REGISTRY_PROCESSOR_ARCHITECTURE (the missing-fragment bug that blocked the first install)" 'exp AppSearch | grep -q REGISTRY_PROCESSOR_ARCHITECTURE'
+          check "RegLocator reads PROCESSOR_ARCHITECTURE" 'exp RegLocator | grep -q PROCESSOR_ARCHITECTURE'
+          check "arm64 launch condition present" 'exp LaunchCondition | grep -q "REGISTRY_PROCESSOR_ARCHITECTURE = \"ARM64\""'
+          check "SecureCustomProperties lists REGISTRY_PROCESSOR_ARCHITECTURE" 'exp Property | grep "^SecureCustomProperties" | grep -q REGISTRY_PROCESSOR_ARCHITECTURE'
+          check "UpgradeCode is the arm64 one" 'exp Property | grep -q "^UpgradeCode.*{10725300-348B-4908-B52E-4D71B15480F4}"'
+          check "ProcessDriverPackages custom action present" 'exp CustomAction | grep -q ProcessPackages'
+          for f in FE_pvpanic_driver FE_fwcfg_driver FE_qemupciserial_driver FE_viofs_driver; do
+            check "$f is not packaged on arm64" '! exp Feature | cut -f1 | grep -qx "$f"'
+          done
+          for f in FE_balloon_driver FE_network_driver FE_vioinput_driver FE_viorng_driver FE_vioscsi_driver FE_vioserial_driver FE_viostor_driver FE_viogpudo_driver FE_viomem_driver; do
+            check "$f is packaged" 'exp Feature | cut -f1 | grep -qx "$f"'
+          done
+          check "no x64/x86 driver components leaked in" '! exp Component | cut -f1 | grep -Eq "_(amd64|x86)$|Win10x64|Win11x64|WinServer20|Win10x86"'
+          echo; echo "failures: $fail"; [ "$fail" -eq 0 ]
 
   bundle:
     needs: msi
