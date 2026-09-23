@@ -170,7 +170,7 @@ jobs:
           foreach ($n in "ph-drv-x64","ph-drv-x86","ph-spice-driver-x64","ph-spice-driver-x86","ph-spice-vdagent-x64","ph-spice-vdagent-x86","ph-qemu-ga-x64","ph-qemu-ga-x86") {
             $g = "{" + [guid]::NewGuid().ToString().ToUpper() + "}"; $u = "{" + [guid]::NewGuid().ToString().ToUpper() + "}"
             dotnet build ph\ph.wixproj -c Release -p:OutputName=$n -p:OutDir="${{ github.workspace }}\stage\" -p:IntermediateOutputPath="obj\$n\" `
-              "-p:DefineConstants=PhName=$n;PhGuid=$g;PhUpg=$u"
+              "-p:DefineConstants=PhName=$n%3BPhGuid=$g%3BPhUpg=$u"
             if ($LASTEXITCODE -ne 0) { throw "placeholder $n failed" }
           }
           Get-ChildItem stage
