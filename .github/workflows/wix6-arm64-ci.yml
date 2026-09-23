@@ -127,6 +127,16 @@ jobs:
           check "no x64/x86 driver components leaked in" '! exp Component | cut -f1 | grep -Eq "_(amd64|x86)$|Win10x64|Win11x64|WinServer20|Win10x86"'
           echo; echo "failures: $fail"; [ "$fail" -eq 0 ]
 
+      - name: Print the arm64 tables in the format of test/msi_values.py
+        shell: bash
+        run: |
+          M=$(find msi -name virtio-win-gt-arm64.msi | head -1)
+          echo "@@COMPONENTS@@"
+          msiinfo export "$M" Component | tail -n +4 | awk -F'\t' '{printf "        '"'"'%s'"'"':['"'"'%s'"'"'],\n", $1, $2}'
+          echo "@@REGLOCATOR@@"
+          msiinfo export "$M" RegLocator | tail -n +4 | awk -F'\t' '{printf "%s | %s | %s\n", $1, $3, $4}'
+          echo "@@END@@"
+
   bundle:
     needs: msi
     runs-on: windows-latest
