@@ -236,6 +236,19 @@ jobs:
             -p:QemuGa64MsiPath="$s\ph-qemu-ga-x64.msi" -p:QemuGa86MsiPath="$s\ph-qemu-ga-x86.msi"
           if ($LASTEXITCODE -ne 0) { throw "bundle build (arm64 excluded) failed" }
           Copy-Item virtio-win-installers-bundler\bin\x64\Release\virtio-win-guest-tools.exe out\virtio-win-guest-tools-TEST-noarm64.exe
+      - name: Build the bundle with only the arm64 qemu-ga (IncludeArm64=false, QemuGaArm64MsiPath set)
+        shell: pwsh
+        run: |
+          $s = "${{ github.workspace }}\stage"
+          dotnet build virtio-win-installers-bundler\virtio-win-installers-bundler.wixproj -c Release --no-incremental `
+            -p:InstallerVersion=${{ env.VERSION }} -p:BuildBundledDriverMsis=false -p:IncludeArm64=false `
+            -p:QemuGaArm64MsiPath="$s\qemu-ga-arm64.msi" `
+            -p:VirtioWinGtX64MsiPath="$s\ph-drv-x64.msi" -p:VirtioWinGtX86MsiPath="$s\ph-drv-x86.msi" `
+            -p:SpiceDriver64MsiPath="$s\ph-spice-driver-x64.msi" -p:SpiceDriver86MsiPath="$s\ph-spice-driver-x86.msi" `
+            -p:SpiceVdagent64MsiPath="$s\ph-spice-vdagent-x64.msi" -p:SpiceVdagent86MsiPath="$s\ph-spice-vdagent-x86.msi" `
+            -p:QemuGa64MsiPath="$s\ph-qemu-ga-x64.msi" -p:QemuGa86MsiPath="$s\ph-qemu-ga-x86.msi"
+          if ($LASTEXITCODE -ne 0) { throw "bundle build (qemu-ga arm64 only) failed" }
+          Copy-Item virtio-win-installers-bundler\bin\x64\Release\virtio-win-guest-tools.exe out\virtio-win-guest-tools-TEST-qgaonly.exe
       - name: Build a native arm64 bundle (Platform=arm64, for Windows 10 on Arm)
         shell: pwsh
         run: |
@@ -257,6 +270,7 @@ jobs:
           $expect = @{
             "virtio-win-guest-tools-TEST-arm64.exe"        = 0x8664
             "virtio-win-guest-tools-TEST-noarm64.exe"      = 0x8664
+            "virtio-win-guest-tools-TEST-qgaonly.exe"      = 0x8664
             "virtio-win-guest-tools-TEST-arm64-native.exe" = 0xAA64
           }
           foreach ($n in $expect.Keys) {
@@ -274,6 +288,7 @@ jobs:
           $expect = @{
             "virtio-win-guest-tools-TEST-arm64.exe"        = $false
             "virtio-win-guest-tools-TEST-noarm64.exe"      = $true
+            "virtio-win-guest-tools-TEST-qgaonly.exe"      = $false
             "virtio-win-guest-tools-TEST-arm64-native.exe" = $false
           }
           foreach ($n in $expect.Keys) {
@@ -283,7 +298,7 @@ jobs:
             $data = Get-ChildItem -Recurse $d -Filter BootstrapperApplicationData.xml | Select-Object -First 1
             if (-not $data) { Get-ChildItem -Recurse $d | Select-Object FullName; throw "$n has no BootstrapperApplicationData.xml" }
             [xml]$x = Get-Content $data.FullName
-            $c = @($x.GetElementsByTagName("WixBalCondition") | Where-Object { $_.Condition -eq "NOT (NativeMachine = 43620)" })
+            $c = @($x.GetElementsByTagName("WixBalCondition") | Where-Object { $_.Condition -eq "WixBundleInstalled OR NOT (NativeMachine = 43620)" })
             "{0}: {1} arm64 refusal condition(s)" -f $n, $c.Count
             if ($expect[$n] -and $c.Count -ne 1) { $x.OuterXml; throw "$n is missing the arm64 refusal condition" }
             if (-not $expect[$n] -and $c.Count -ne 0) { throw "$n has the arm64 refusal condition but includes arm64" }
@@ -294,5 +309,6 @@ jobs:
           path: |
             out/virtio-win-guest-tools-TEST-arm64.exe
             out/virtio-win-guest-tools-TEST-noarm64.exe
+            out/virtio-win-guest-tools-TEST-qgaonly.exe
             out/virtio-win-guest-tools-TEST-arm64-native.exe
           if-no-files-found: error
