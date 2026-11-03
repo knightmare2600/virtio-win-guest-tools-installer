@@ -235,9 +235,64 @@ jobs:
             -p:SpiceVdagent64MsiPath="$s\ph-spice-vdagent-x64.msi" -p:SpiceVdagent86MsiPath="$s\ph-spice-vdagent-x86.msi" `
             -p:QemuGa64MsiPath="$s\ph-qemu-ga-x64.msi" -p:QemuGa86MsiPath="$s\ph-qemu-ga-x86.msi"
           if ($LASTEXITCODE -ne 0) { throw "bundle build (arm64 excluded) failed" }
+          Copy-Item virtio-win-installers-bundler\bin\x64\Release\virtio-win-guest-tools.exe out\virtio-win-guest-tools-TEST-noarm64.exe
+      - name: Build a native arm64 bundle (Platform=arm64, for Windows 10 on Arm)
+        shell: pwsh
+        run: |
+          $s = "${{ github.workspace }}\stage"
+          dotnet build virtio-win-installers-bundler\virtio-win-installers-bundler.wixproj -c Release --no-incremental `
+            -p:Platform=arm64 -p:InstallerVersion=${{ env.VERSION }} -p:BuildBundledDriverMsis=false -p:IncludeArm64=true `
+            -p:VirtioWinGtX64MsiPath="$s\ph-drv-x64.msi" -p:VirtioWinGtX86MsiPath="$s\ph-drv-x86.msi" `
+            -p:VirtioWinGtArm64MsiPath="$s\virtio-win-gt-arm64.msi" -p:QemuGaArm64MsiPath="$s\qemu-ga-arm64.msi" `
+            -p:SpiceDriver64MsiPath="$s\ph-spice-driver-x64.msi" -p:SpiceDriver86MsiPath="$s\ph-spice-driver-x86.msi" `
+            -p:SpiceVdagent64MsiPath="$s\ph-spice-vdagent-x64.msi" -p:SpiceVdagent86MsiPath="$s\ph-spice-vdagent-x86.msi" `
+            -p:QemuGa64MsiPath="$s\ph-qemu-ga-x64.msi" -p:QemuGa86MsiPath="$s\ph-qemu-ga-x86.msi"
+          if ($LASTEXITCODE -ne 0) { throw "bundle build (Platform=arm64) failed" }
+          $exe = "virtio-win-installers-bundler\bin\arm64\Release\virtio-win-guest-tools.exe"
+          if (-not (Test-Path $exe)) { throw "arm64 bundle not at $exe" }
+          Copy-Item $exe out\virtio-win-guest-tools-TEST-arm64-native.exe
+      - name: Check the PE machine type of each bundle
+        shell: pwsh
+        run: |
+          $expect = @{
+            "virtio-win-guest-tools-TEST-arm64.exe"        = 0x8664
+            "virtio-win-guest-tools-TEST-noarm64.exe"      = 0x8664
+            "virtio-win-guest-tools-TEST-arm64-native.exe" = 0xAA64
+          }
+          foreach ($n in $expect.Keys) {
+            $b = [IO.File]::ReadAllBytes("out\$n")
+            $pe = [BitConverter]::ToInt32($b, 0x3C)
+            $m = [BitConverter]::ToUInt16($b, $pe + 4)
+            "{0}: machine 0x{1:X4}" -f $n, $m
+            if ($m -ne $expect[$n]) { throw ("{0}: expected machine 0x{1:X4}" -f $n, $expect[$n]) }
+          }
+      - name: Check the arm64 refusal condition is only in the bundle without arm64
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          dotnet tool install --global wix --version 6.0.2
+          $expect = @{
+            "virtio-win-guest-tools-TEST-arm64.exe"        = $false
+            "virtio-win-guest-tools-TEST-noarm64.exe"      = $true
+            "virtio-win-guest-tools-TEST-arm64-native.exe" = $false
+          }
+          foreach ($n in $expect.Keys) {
+            $d = "extract\$n"
+            wix burn extract "out\$n" -oba "$d\ba" -o "$d\payloads"
+            if ($LASTEXITCODE -ne 0) { throw "wix burn extract $n failed" }
+            $data = Get-ChildItem -Recurse $d -Filter BootstrapperApplicationData.xml | Select-Object -First 1
+            if (-not $data) { Get-ChildItem -Recurse $d | Select-Object FullName; throw "$n has no BootstrapperApplicationData.xml" }
+            [xml]$x = Get-Content $data.FullName
+            $c = @($x.GetElementsByTagName("WixBalCondition") | Where-Object { $_.Condition -eq "NOT (NativeMachine = 43620)" })
+            "{0}: {1} arm64 refusal condition(s)" -f $n, $c.Count
+            if ($expect[$n] -and $c.Count -ne 1) { $x.OuterXml; throw "$n is missing the arm64 refusal condition" }
+            if (-not $expect[$n] -and $c.Count -ne 0) { throw "$n has the arm64 refusal condition but includes arm64" }
+          }
       - uses: actions/upload-artifact@v4
         with:
           name: TEST-bundle-arm64
           path: |
             out/virtio-win-guest-tools-TEST-arm64.exe
+            out/virtio-win-guest-tools-TEST-noarm64.exe
+            out/virtio-win-guest-tools-TEST-arm64-native.exe
           if-no-files-found: error
